@@ -1,3 +1,6 @@
+# Claude
+.claude/
+
 # Build
 build/
 cmake-build-*/
