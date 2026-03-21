@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git init:*)",
+      "Bash(cmake -B build -DCMAKE_BUILD_TYPE=Release)",
+      "Bash(cmake --build build --config Release)",
+      "Bash(echo -e \"help\\\\necho hello world\\\\necho \"\"quoted string\"\"\\\\nmkdir testdir\\\\nrmdir testdir\\\\nmkfile testfile.txt\\\\nrmfile testfile.txt\\\\nbadcmd\\\\nexit\")",
+      "Bash(/c/Users/Aleks/Workspace/aosh/build/Release/aosh.exe)",
+      "Bash(cmake -B build)",
+      "Bash(taskkill //F //IM aosh.exe)"
+    ]
+  }
+}

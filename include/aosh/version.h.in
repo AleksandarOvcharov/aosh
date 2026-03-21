@@ -1,0 +1,3 @@
+#pragma once
+
+#define AOSH_VERSION "@PROJECT_VERSION@"
