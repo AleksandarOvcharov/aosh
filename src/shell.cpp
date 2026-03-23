@@ -6,109 +6,302 @@
 #include "aosh/commands/filesystem.h"
 #include "aosh/commands/help.h"
 #include "aosh/process.h"
+#include <algorithm>
+#include <conio.h>
 #include <filesystem>
 #include <iostream>
-
-#ifdef _WIN32
-#include <windows.h>
+#ifndef NOMINMAX
+#define NOMINMAX
 #endif
+#include <windows.h>
 
 namespace aosh {
 
-#ifdef _WIN32
-// Fully raw line reader for Windows console.
-// All console modes (echo, line editing, processed input) are disabled.
-// We handle echo, backspace, Enter, and Ctrl+C manually so nothing leaks.
-static bool win_read_line(std::string& out) {
-    out.clear();
-    HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+// ---------------------------------------------------------------------------
+// Console helpers — use Win32 API for reliable cursor positioning
+// ---------------------------------------------------------------------------
 
-    // If there is no interactive console (e.g. IDE, piped input), fall back
-    DWORD orig_mode = 0;
-    if (hIn == INVALID_HANDLE_VALUE || !GetConsoleMode(hIn, &orig_mode)) {
-        return static_cast<bool>(std::getline(std::cin, out));
+static HANDLE h_out() {
+    static HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    return h;
+}
+
+static COORD get_cursor() {
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    GetConsoleScreenBufferInfo(h_out(), &info);
+    return info.dwCursorPosition;
+}
+
+static void set_cursor(COORD pos) {
+    SetConsoleCursorPosition(h_out(), pos);
+}
+
+static int term_width() {
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    if (GetConsoleScreenBufferInfo(h_out(), &info)) {
+        return info.srWindow.Right - info.srWindow.Left + 1;
     }
+    return 80;
+}
 
-    // Save and set raw mode — no echo, no line edit, no Ctrl+C signal
-    SetConsoleMode(hIn, 0);
+// Clear from pos to end of screen
+static void clear_from(COORD pos) {
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    GetConsoleScreenBufferInfo(h_out(), &info);
+    DWORD total = info.dwSize.X * (info.dwSize.Y - pos.Y) - pos.X;
+    DWORD written;
+    FillConsoleOutputCharacterA(h_out(), ' ', total, pos, &written);
+    FillConsoleOutputAttribute(h_out(), info.wAttributes, total, pos, &written);
+}
 
-    while (true) {
-        INPUT_RECORD rec;
-        DWORD count = 0;
-        if (!ReadConsoleInputW(hIn, &rec, 1, &count) || count == 0) {
-            SetConsoleMode(hIn, orig_mode);
-            return false;
+// Write string at current cursor, advancing cursor
+static void con_write(const std::string& s) {
+    DWORD written;
+    WriteConsoleA(h_out(), s.c_str(), static_cast<DWORD>(s.size()), &written, nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Candidate box rendering
+// ---------------------------------------------------------------------------
+
+struct CandidateBox {
+    COORD origin;       // top-left of the candidate area (line below prompt)
+    size_t num_lines;   // how many lines the box occupies
+    bool visible;
+
+    CandidateBox() : origin{0, 0}, num_lines(0), visible(false) {}
+
+    void draw(const std::vector<std::string>& candidates, size_t active,
+              COORD prompt_cursor) {
+        int width = term_width();
+
+        size_t max_len = 0;
+        for (const auto& c : candidates) max_len = std::max(max_len, c.size());
+        size_t col_width = max_len + 2;
+        size_t cols = std::max<size_t>(1, static_cast<size_t>(width) / col_width);
+        num_lines = (candidates.size() + cols - 1) / cols;
+
+        // Position: one line below the prompt
+        origin = {0, static_cast<SHORT>(prompt_cursor.Y + 1)};
+
+        // Make room: scroll if near bottom of visible window
+        CONSOLE_SCREEN_BUFFER_INFO info;
+        GetConsoleScreenBufferInfo(h_out(), &info);
+        SHORT visible_bottom = info.srWindow.Bottom;
+        SHORT needed_bottom = origin.Y + static_cast<SHORT>(num_lines) - 1;
+        if (needed_bottom > visible_bottom) {
+            // Print enough newlines to scroll the buffer
+            set_cursor({0, visible_bottom});
+            SHORT scroll = needed_bottom - visible_bottom;
+            for (SHORT i = 0; i < scroll; ++i) con_write("\r\n");
+            // Adjust all positions after scroll
+            origin.Y -= scroll;
+            prompt_cursor.Y -= scroll;
         }
 
-        // Only care about key-down events
-        if (rec.EventType != KEY_EVENT || !rec.Event.KeyEvent.bKeyDown) {
+        // Clear the candidate area
+        set_cursor(origin);
+        clear_from(origin);
+
+        // Draw candidates in columns
+        set_cursor(origin);
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            if (i == active) {
+                // White background, black text, bold
+                con_write("\033[47m\033[30m\033[1m");
+            }
+            std::string padded = candidates[i];
+            if (padded.size() < col_width) padded.resize(col_width, ' ');
+            con_write(padded);
+            if (i == active) {
+                con_write("\033[0m");
+            }
+
+            bool end_of_row = ((i + 1) % cols == 0);
+            bool last = (i + 1 == candidates.size());
+            if (end_of_row && !last) {
+                COORD cur = get_cursor();
+                set_cursor({0, static_cast<SHORT>(cur.Y + 1)});
+            }
+        }
+
+        // Restore cursor to prompt line
+        set_cursor(prompt_cursor);
+        visible = true;
+    }
+
+    void hide(COORD prompt_cursor) {
+        if (!visible) return;
+        // Clear everything from the candidate area down
+        clear_from(origin);
+        set_cursor(prompt_cursor);
+        visible = false;
+        num_lines = 0;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Line reader with Tab completion
+// ---------------------------------------------------------------------------
+
+static bool read_line(std::string& out, completion::Completer& completer,
+                      const std::string& prompt) {
+    out.clear();
+    completer.reset();
+
+    CandidateBox box;
+    std::string saved_line;     // line before completion started
+    COORD line_start = get_cursor();  // cursor at start of user input (after prompt)
+
+    // Compute cursor position at end of current input
+    auto input_cursor = [&]() -> COORD {
+        COORD c = line_start;
+        c.X += static_cast<SHORT>(out.size());
+        // Handle line wrap
+        CONSOLE_SCREEN_BUFFER_INFO info;
+        GetConsoleScreenBufferInfo(h_out(), &info);
+        if (c.X >= info.dwSize.X) {
+            c.Y += c.X / info.dwSize.X;
+            c.X = c.X % info.dwSize.X;
+        }
+        return c;
+    };
+
+    // Replace input from word_start onward, update screen
+    auto replace_word = [&](size_t word_start, const std::string& replacement) {
+        // Erase visible input from word_start onward
+        COORD erase_pos = line_start;
+        erase_pos.X += static_cast<SHORT>(word_start);
+        set_cursor(erase_pos);
+        // Clear from here to end of line
+        DWORD written;
+        CONSOLE_SCREEN_BUFFER_INFO info;
+        GetConsoleScreenBufferInfo(h_out(), &info);
+        DWORD chars_to_clear = static_cast<DWORD>(out.size() - word_start);
+        FillConsoleOutputCharacterA(h_out(), ' ', chars_to_clear, erase_pos, &written);
+        // Write replacement
+        set_cursor(erase_pos);
+        con_write(replacement);
+        // Update buffer
+        out = out.substr(0, word_start) + replacement;
+    };
+
+    while (true) {
+        int ch = _getch();
+
+        // Special keys (0x00 or 0xE0 prefix): consume and cancel
+        if (ch == 0 || ch == 0xE0) {
+            _getch();
+            if (box.visible) {
+                // Cancel: restore original text
+                auto ctx = completion::build_context(out, out.size());
+                replace_word(ctx.word_start, saved_line.substr(ctx.word_start));
+                out = saved_line;
+                box.hide(input_cursor());
+                completer.reset();
+            }
             continue;
         }
 
-        wchar_t wch = rec.Event.KeyEvent.uChar.UnicodeChar;
-        WORD vk = rec.Event.KeyEvent.wVirtualKeyCode;
-
-        // Ctrl+C
-        if (wch == L'\x03' || (vk == 'C' && (rec.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)))) {
-            // Erase the typed text visually
-            if (!out.empty()) {
-                CONSOLE_SCREEN_BUFFER_INFO info;
-                GetConsoleScreenBufferInfo(hOut, &info);
-                COORD pos = info.dwCursorPosition;
-                pos.X -= static_cast<SHORT>(out.size());
-                SetConsoleCursorPosition(hOut, pos);
-                DWORD written;
-                FillConsoleOutputCharacterA(hOut, ' ', static_cast<DWORD>(out.size()), pos, &written);
-                SetConsoleCursorPosition(hOut, pos);
+        // ---- Tab: show/cycle completion ----
+        if (ch == '\t') {
+            if (!box.visible) {
+                // Save current line before completion modifies it
+                saved_line = out;
             }
-            out.clear();
-            // Print ^C and newline
-            DWORD written;
-            WriteConsoleA(hOut, "^C\r\n", 4, &written, nullptr);
-            SetConsoleMode(hIn, orig_mode);
-            return true; // not EOF, just cancelled
+
+            auto result = completer.on_tab(out, out.size());
+
+            if (!result.replacement.empty()) {
+                auto ctx = completion::build_context(
+                    box.visible ? out : saved_line,
+                    box.visible ? out.size() : saved_line.size());
+                replace_word(ctx.word_start, result.replacement);
+            }
+
+            if (result.show_candidates && !result.candidates.empty()) {
+                box.draw(result.candidates, result.active_index, input_cursor());
+                // Recalculate line_start in case scrolling happened
+                COORD cur = get_cursor();
+                line_start.Y = cur.Y;
+                line_start.X = cur.X - static_cast<SHORT>(out.size());
+            }
+            continue;
         }
 
-        // Enter — don't echo newline, the clear_screen will reset the view
-        if (wch == L'\r' || wch == L'\n') {
-            SetConsoleMode(hIn, orig_mode);
+        // ---- Enter ----
+        if (ch == '\r' || ch == '\n') {
+            if (box.visible) {
+                // Accept: hide box, keep current completion in place
+                box.hide(input_cursor());
+                completer.reset();
+                // Don't return — let user see the completed line and confirm
+                continue;
+            }
+            completer.reset();
             return true;
         }
 
-        // Backspace
-        if (wch == L'\b' || vk == VK_BACK) {
+        // ---- Ctrl+C ----
+        if (ch == 3) {
+            if (box.visible) {
+                box.hide(input_cursor());
+                completer.reset();
+            }
+            // Clear line
+            set_cursor(line_start);
+            DWORD written;
+            FillConsoleOutputCharacterA(h_out(), ' ', static_cast<DWORD>(out.size()),
+                                        line_start, &written);
+            set_cursor(line_start);
+            out.clear();
+            con_write("^C\r\n");
+            completer.reset();
+            return true;
+        }
+
+        // ---- Any other key while box visible: cancel ----
+        if (box.visible) {
+            auto ctx = completion::build_context(saved_line, saved_line.size());
+            replace_word(ctx.word_start, saved_line.substr(ctx.word_start));
+            out = saved_line;
+            box.hide(input_cursor());
+            completer.reset();
+            // Fall through to process the key normally
+        }
+
+        // ---- Backspace ----
+        if (ch == '\b' || ch == 127) {
             if (!out.empty()) {
                 out.pop_back();
-                // Move cursor back, overwrite with space, move back again
-                DWORD written;
-                WriteConsoleA(hOut, "\b \b", 3, &written, nullptr);
+                con_write("\b \b");
             }
+            completer.reset();
             continue;
         }
 
-        // Ignore non-printable / special keys (arrows, F-keys, etc.)
-        if (wch == 0 || wch < L' ') {
+        // Ignore other control characters
+        if (ch < ' ') {
             continue;
         }
 
-        // Normal character — echo and append
-        char ch = static_cast<char>(wch);
-        out += ch;
-        DWORD written;
-        WriteConsoleA(hOut, &ch, 1, &written, nullptr);
+        // ---- Normal printable character ----
+        char c = static_cast<char>(ch);
+        out += c;
+        con_write(std::string(1, c));
+        completer.reset();
     }
 }
-#endif
+
+// ---------------------------------------------------------------------------
+// Shell
+// ---------------------------------------------------------------------------
 
 static void clear_screen() {
-    // \033[2J  — clear visible screen
-    // \033[3J  — clear scrollback buffer (Windows Terminal, modern terminals)
-    // \033[H   — move cursor to top-left
     std::cout << "\033[2J\033[3J\033[H" << std::flush;
 }
 
-Shell::Shell() {
+Shell::Shell() : completer_(registry_) {
     color::init();
 
     commands::register_echo(registry_);
@@ -128,6 +321,11 @@ Shell::Shell() {
     });
 }
 
+std::string Shell::prompt_string() const {
+    return std::string(color::bold) + color::cyan + "aosh " + color::reset
+         + std::filesystem::current_path().string() + "> ";
+}
+
 void Shell::run() {
     clear_screen();
     std::cout << color::bold << color::cyan << "aosh" << color::reset
@@ -135,19 +333,12 @@ void Shell::run() {
 
     std::string line;
     while (running_) {
-        std::cout << color::bold << color::cyan << "aosh " << color::reset
-                  << std::filesystem::current_path().string() << "> "
-                  << std::flush;
+        auto prompt = prompt_string();
+        std::cout << prompt << std::flush;
 
-#ifdef _WIN32
-        if (!win_read_line(line)) {
+        if (!read_line(line, completer_, prompt)) {
             break;
         }
-#else
-        if (!std::getline(std::cin, line)) {
-            break;
-        }
-#endif
         if (!line.empty()) {
             std::cout << "\n";
             execute(line);
@@ -160,7 +351,6 @@ void Shell::execute(const std::string& input) {
 
     auto* cmd = registry_.find(name);
     if (!cmd) {
-        // Not a built-in — try running as an external program
         int rc = process::run(name, args);
         if (rc == -1) {
             std::cerr << color::red << "aosh: unknown command: " << name

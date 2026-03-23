@@ -23,6 +23,11 @@ add_executable(aosh
     src/commands/filesystem.cpp
     src/commands/help.cpp
     src/process.cpp
+    src/completion/completer.cpp
+    src/completion/completion_context.cpp
+    src/completion/command_provider.cpp
+    src/completion/path_exe_provider.cpp
+    src/completion/filesystem_provider.cpp
 )
 
 target_include_directories(aosh PRIVATE
