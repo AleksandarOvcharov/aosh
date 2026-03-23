@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.10)
 project(aosh VERSION 0.1.0 LANGUAGES CXX)
 
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -18,6 +22,7 @@ add_executable(aosh
     src/commands/echo.cpp
     src/commands/filesystem.cpp
     src/commands/help.cpp
+    src/process.cpp
 )
 
 target_include_directories(aosh PRIVATE

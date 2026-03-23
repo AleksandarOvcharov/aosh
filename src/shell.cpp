@@ -5,6 +5,7 @@
 #include "aosh/commands/echo.h"
 #include "aosh/commands/filesystem.h"
 #include "aosh/commands/help.h"
+#include "aosh/process.h"
 #include <filesystem>
 #include <iostream>
 
@@ -23,9 +24,13 @@ static bool win_read_line(std::string& out) {
     HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
 
-    // Save and set raw mode — no echo, no line edit, no Ctrl+C signal
+    // If there is no interactive console (e.g. IDE, piped input), fall back
     DWORD orig_mode = 0;
-    GetConsoleMode(hIn, &orig_mode);
+    if (hIn == INVALID_HANDLE_VALUE || !GetConsoleMode(hIn, &orig_mode)) {
+        return static_cast<bool>(std::getline(std::cin, out));
+    }
+
+    // Save and set raw mode — no echo, no line edit, no Ctrl+C signal
     SetConsoleMode(hIn, 0);
 
     while (true) {
@@ -155,11 +160,14 @@ void Shell::execute(const std::string& input) {
 
     auto* cmd = registry_.find(name);
     if (!cmd) {
-        std::cerr << color::red << "aosh: unknown command: " << name
-                  << color::reset << "\n";
+        // Not a built-in — try running as an external program
+        int rc = process::run(name, args);
+        if (rc == -1) {
+            std::cerr << color::red << "aosh: unknown command: " << name
+                      << color::reset << "\n";
+        }
         return;
     }
-    // 'clear' already clears the screen, skip the default clear-before-prompt
     cmd->handler(args);
 }
 
