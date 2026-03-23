@@ -22,6 +22,7 @@ add_executable(aosh
     src/commands/echo.cpp
     src/commands/filesystem.cpp
     src/commands/help.cpp
+    src/commands/ls.cpp
     src/process.cpp
     src/completion/completer.cpp
     src/completion/completion_context.cpp

@@ -5,6 +5,7 @@
 #include "aosh/commands/echo.h"
 #include "aosh/commands/filesystem.h"
 #include "aosh/commands/help.h"
+#include "aosh/commands/ls.h"
 #include "aosh/process.h"
 #include <algorithm>
 #include <conio.h>
@@ -307,6 +308,7 @@ Shell::Shell() : completer_(registry_) {
     commands::register_echo(registry_);
     commands::register_filesystem(registry_);
     commands::register_help(registry_);
+    commands::register_ls(registry_);
 
     registry_.add("pwd", "Print current working directory", [](const std::vector<std::string>&) {
         std::cout << std::filesystem::current_path().string() << "\n";
