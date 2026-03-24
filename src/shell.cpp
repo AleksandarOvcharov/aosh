@@ -146,13 +146,18 @@ struct CandidateBox {
 // ---------------------------------------------------------------------------
 
 static bool read_line(std::string& out, completion::Completer& completer,
-                      const std::string& prompt) {
+                      const std::string& prompt,
+                      const std::vector<std::string>& history) {
     out.clear();
     completer.reset();
 
     CandidateBox box;
     std::string saved_line;     // line before completion started
     COORD line_start = get_cursor();  // cursor at start of user input (after prompt)
+
+    // History navigation state
+    int hist_index = static_cast<int>(history.size());  // past-the-end = current input
+    std::string hist_saved;  // what the user typed before navigating history
 
     // Compute cursor position at end of current input
     auto input_cursor = [&]() -> COORD {
@@ -166,6 +171,19 @@ static bool read_line(std::string& out, completion::Completer& completer,
             c.X = c.X % info.dwSize.X;
         }
         return c;
+    };
+
+    // Redraw the entire input line
+    auto redraw_line = [&]() {
+        set_cursor(line_start);
+        DWORD written;
+        CONSOLE_SCREEN_BUFFER_INFO info;
+        GetConsoleScreenBufferInfo(h_out(), &info);
+        // Clear old content
+        DWORD max_clear = static_cast<DWORD>(info.dwSize.X * 2);
+        FillConsoleOutputCharacterA(h_out(), ' ', max_clear, line_start, &written);
+        set_cursor(line_start);
+        con_write(out);
     };
 
     // Replace input from word_start onward, update screen
@@ -190,17 +208,46 @@ static bool read_line(std::string& out, completion::Completer& completer,
     while (true) {
         int ch = _getch();
 
-        // Special keys (0x00 or 0xE0 prefix): consume and cancel
+        // Special keys (0x00 or 0xE0 prefix)
         if (ch == 0 || ch == 0xE0) {
-            _getch();
+            int key = _getch();
+
+            // Cancel completion box if visible
             if (box.visible) {
-                // Cancel: restore original text
                 auto ctx = completion::build_context(out, out.size());
                 replace_word(ctx.word_start, saved_line.substr(ctx.word_start));
                 out = saved_line;
                 box.hide(input_cursor());
                 completer.reset();
             }
+
+            // Up arrow
+            if (key == 0x48) {
+                if (hist_index > 0) {
+                    if (hist_index == static_cast<int>(history.size())) {
+                        hist_saved = out;  // save current input
+                    }
+                    --hist_index;
+                    out = history[hist_index];
+                    redraw_line();
+                }
+                continue;
+            }
+
+            // Down arrow
+            if (key == 0x50) {
+                if (hist_index < static_cast<int>(history.size())) {
+                    ++hist_index;
+                    if (hist_index == static_cast<int>(history.size())) {
+                        out = hist_saved;  // restore original input
+                    } else {
+                        out = history[hist_index];
+                    }
+                    redraw_line();
+                }
+                continue;
+            }
+
             continue;
         }
 
@@ -338,11 +385,12 @@ void Shell::run() {
         auto prompt = prompt_string();
         std::cout << prompt << std::flush;
 
-        if (!read_line(line, completer_, prompt)) {
+        if (!read_line(line, completer_, prompt, history_)) {
             break;
         }
         if (!line.empty()) {
             std::cout << "\n";
+            history_.push_back(line);
             execute(line);
         }
     }
