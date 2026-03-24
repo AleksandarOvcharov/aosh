@@ -13,6 +13,7 @@ A lightweight Windows shell written in C++17.
   - Completes built-in commands, PATH executables, and file/directory paths
   - White-highlighted active selection
   - Skips display when there are too many matches (>50)
+- **Command history**: Up/Down arrow keys navigate through previously entered commands
 
 ## ls
 
@@ -24,7 +25,7 @@ ls [flags] [path ...]
 
 | Flag | Description |
 |------|-------------|
-| `-l` | Long format — permissions, size, date, name |
+| `-l` | Long format — type (File/Folder), size, date, name |
 | `-a` | Show hidden files (dotfiles + Windows hidden attribute) |
 | `-h` | Human-readable sizes (KB, MB, GB) |
 | `-R` | Recursive listing |
@@ -90,4 +91,5 @@ aosh C:\Users\You> ls -lah
 aosh C:\Users\You> hel<Tab>     →  help
 aosh C:\Users\You> echo <Tab>   →  shows files/dirs in current directory
 aosh C:\Users\You> git<Tab>     →  git (from PATH)
+aosh C:\Users\You> <Up>         →  recall previous command
 ```
