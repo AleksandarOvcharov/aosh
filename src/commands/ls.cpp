@@ -192,14 +192,14 @@ static void print_long(const std::vector<EntryInfo>& entries, const LsFlags& fla
 
     for (const auto& e : entries) {
         std::error_code ec;
-        auto perms = e.entry.status(ec).permissions();
-        char type = e.entry.is_directory(ec) ? 'd' : (e.entry.is_symlink(ec) ? 'l' : '-');
+
+        std::string type_label = e.entry.is_directory(ec) ? "Folder" : "File  ";
 
         std::string sz = format_size(e.size, flags.human);
         std::string time_str = format_time(e.mtime);
         std::string name = colorize(e.entry);
 
-        std::cout << type << permissions_string(perms) << "  "
+        std::cout << color::cyan << type_label << color::reset << "  "
                   << std::setw(static_cast<int>(max_size_width)) << std::right << sz << "  "
                   << time_str << "  "
                   << name << "\n";
@@ -253,7 +253,7 @@ static void list_directory(const fs::path& dir, const LsFlags& flags, bool show_
     sort_entries(entries, flags);
 
     if (flags.long_fmt) {
-        std::cout << "total " << entries.size() << "\n";
+        std::cout << "Total " << entries.size() << "\n\n";
         print_long(entries, flags);
     } else {
         print_columns(entries);
